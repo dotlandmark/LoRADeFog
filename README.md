@@ -1,4 +1,4 @@
-# Official Repo for DeFog
+# Official Repo for OnDeFog
 
 [![python](https://img.shields.io/badge/python-3.10-blue.svg)](https://www.python.org/downloads/release/python-3109/)
 [![arXiv](https://img.shields.io/badge/arXiv-2303.03391-b31b1b.svg)](https://arxiv.org/abs/2303.03391)
@@ -12,7 +12,7 @@
 
 ## Overview
 
-Code release for the ICLR 2023 conference paper:
+Code release for the PRICAI 2025 conference paper:
 
 <table><tr><td>
     <strong>
@@ -30,15 +30,10 @@ Code release for the ICLR 2023 conference paper:
 
 ---
 
-DeFog is an offline RL algorithm
-that enables agents to act robustly in frame dropping scenarios (where observations are not arrived at each timestep, but have a possibility to be dropped). DeFog is able to remain much of the performance when the dropping rate is as high as 90% (as shown in the figure below), while the naive approach to repeat the last action has near zero perfermance once the dropping rate is above 50%.
+OnDeFog is an online RL algorithm that is robust to frame dropping.
+OnDeFog integrates the mechanisms in [DeFog](https://github.com/hukz18/DeFog) with [the online decision transformer](https://github.com/facebookresearch/online-dt), an online reinforcement learning method that learns policies through direct environmental interaction.Comprehensive experimental evaluation demonstrates that our proposed OnDeFog achieves superior performance compared to ODT in environments characterized by high dropping frame rate and outperforms DeFog on datasets containing a large amount of low-reward data.
 
-
-<p align="center">
-  <img src="./images/defog_demo.gif" width="90%"/>
-</p>
-
-DeFog first randomly masks out data in the offline datasets and explicitly adds the time span of frame dropping as inputs. After that, a finetuning stage on  the same offline dataset with a higher mask rate would further boost the performance. Please refer to the conference paper for further information.
+Please refer to the conference paper for further information.
 
 ## Setup
 To create the environment of defog, firstly run the following command:

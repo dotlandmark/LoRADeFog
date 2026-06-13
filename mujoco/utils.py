@@ -1,3 +1,5 @@
+import csv
+from datetime import datetime
 import os
 import sys
 import torch
@@ -154,12 +156,31 @@ def visualize_perf_drop_curve(cfg, log_dict):
     plt.figure(figsize=(10, 6))
     plt.title(f'{cfg.env.env_name} {cfg.buffer.dataset.title()} Performance-Drop Curve')
     plot_scores(perf_drop_curve, color='C2', label=f'train_{cfg.buffer.drop_cfg.drop_p:.1f}')
+    get_final_csv(perf_drop_curve,'train')
     perf_drop_finetune = list(log_dict['perf_drop_finetune'])
     if len(perf_drop_finetune[0]) > 0:
         plot_scores(perf_drop_finetune, color='C1', label=f'finetune_{cfg.buffer.drop_cfg.finetune_drop_p:.1f}')
+        get_final_csv(perf_drop_finetune,'finetune')
     plt.xticks(np.arange(len(cfg.train.eval_drop_ps)), [f'{i:.1f}' for i in cfg.train.eval_drop_ps])
     plt.xlabel('drop rate')
     plt.ylabel('performance')
     plt.legend()
     plt.savefig('perf_drop_curve.png')
     plt.close()
+
+def get_final_csv(scores,modelname,window=100):
+    avg_scores = [moving_average(score, window) for score in scores]
+    avg_scores = pad_and_get_mask(avg_scores)
+    avg_mean = avg_scores.mean(axis=0)
+    avg_std = avg_scores.std(axis=0)
+    avg_q75,avg_q25 = np.percentile(avg_scores,[75,25],axis=0)
+    droplist = [['drop_p','return','std','75%','25%']]
+    drop_p = 0
+    for (mean, std, q75, q25) in zip(avg_mean,avg_std,avg_q75,avg_q25):
+        droplist.append([format(drop_p*0.1,'.1f'),mean,std,q75,q25])
+        drop_p=drop_p+1
+    nowtime = datetime.now().strftime("%Y%m%d%H%M%S")
+    with open(nowtime+modelname+'final'+'.csv','w') as f:
+        writer = csv.writer(f)
+        for row in avg_scores:
+            writer.writerow(row)

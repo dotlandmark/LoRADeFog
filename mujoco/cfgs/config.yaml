@@ -1,6 +1,6 @@
 defaults:
   - _self_
-  - env: hopper
+  - env: walker2d
 
 seeds: 
 - 0
@@ -17,8 +17,11 @@ train:
   weight_decay: 1e-3
   vec_envs: ${vec_envs}
   env_name: ${env.env_name}
-  train_steps: 50_000
-  finetune_steps: 10_000
+  #train_steps: 455_000
+  train_steps: 1000
+  finetune_steps: 0
+  #train_steps: 365_000
+  #finetune_steps: 90_000
   batch_size: 256
   plot_interval: 500
   eval_interval: 500
@@ -36,9 +39,9 @@ buffer:
   gamma: 1.0
   drop_cfg:
     drop_fn: const
-    drop_p: 0.8
+    drop_p: 0.0
     finetune_drop_p: 0.8
-    update_interval: 500
+    update_interval: 100
     drop_aware: ${model.drop_aware}
   
 model:
@@ -57,3 +60,34 @@ hydra:
     chdir: true
   run:
     dir: ./runs/${now:%Y-%m-%d}/${now:%H-%M-%S}_${hydra.job.override_dirname}
+
+lora:
+  use_lora: true
+  r: 8
+  lora_alpha: 16
+  lora_dropout: 0.0
+  lora_save_path: /home/daikiyotsufuji/CODE/DeFog/mujoco/model/lora
+  lora_load_path: /home/daikiyotsufuji/CODE/DeFog/mujoco/model/lora/
+load_model:
+  use_load_model: true
+  #last ni .pt ha iranai!
+  load_model_path: /home/daikiyotsufuji/CODE/DeFog/mujoco/model/walker2d_medium_00
+  # CUDA_VISIBLE_DEVICES=1 python main.py 
+
+part_dropping:
+  use_part_dropping: true
+  drop_features: [0, 1, 2]
+
+dynamic_lora:
+  use_dynamic_lora: false
+  lora_load_path:
+    drop0_0: /home/daikiyotsufuji/CODE/DeFog/mujoco/model/walker2d/00
+    drop0_1: /home/daikiyotsufuji/CODE/DeFog/mujoco/model/walker2d/01
+    drop0_2: /home/daikiyotsufuji/CODE/DeFog/mujoco/model/walker2d/02
+    drop0_3: /home/daikiyotsufuji/CODE/DeFog/mujoco/model/walker2d/03
+    drop0_4: /home/daikiyotsufuji/CODE/DeFog/mujoco/model/walker2d/04
+    drop0_5: /home/daikiyotsufuji/CODE/DeFog/mujoco/model/walker2d/05
+    drop0_6: /home/daikiyotsufuji/CODE/DeFog/mujoco/model/walker2d/06
+    drop0_7: /home/daikiyotsufuji/CODE/DeFog/mujoco/model/walker2d/07
+    drop0_8: /home/daikiyotsufuji/CODE/DeFog/mujoco/model/walker2d/08
+    drop0_9: /home/daikiyotsufuji/CODE/DeFog/mujoco/model/walker2d/09

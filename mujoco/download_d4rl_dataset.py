@@ -7,12 +7,12 @@ from tqdm import tqdm
 import collections
 import pickle
 import urllib
+import urllib.request
 # d4rl requires gym<0.25.0, so we need to downgrade gym to download the dataset
 
 datasets = []
 DATASET_PATH = os.path.expanduser('~/.d4rl/datasets')
 DATASET_URL_BASE = 'http://rail.eecs.berkeley.edu/datasets/offline_rl/gym_mujoco_v2'
-
 def filepath_from_url(dataset_url):
 	_, dataset_name = os.path.split(dataset_url)
 	dataset_filepath = os.path.join(DATASET_PATH, dataset_name)
@@ -72,7 +72,7 @@ def get_dataset(env, env_name, dataset_type):
 
 
 for env_name in ['HalfCheetah', 'Hopper', 'Walker2d']:
-	for dataset_type in ['medium_replay', 'medium', 'expert']:
+	for dataset_type in ['medium_replay', 'medium', 'expert','random']:
 		env = gym.make(f'{env_name}-v4')
 		dataset = get_dataset(env, env_name.lower(), dataset_type)
 

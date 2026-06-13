@@ -1,3 +1,5 @@
+import math
+
 import utils
 import torch
 import numpy as np
@@ -11,6 +13,12 @@ import torch.nn.functional as F
 from gymnasium.vector import SyncVectorEnv
 from gymnasium.wrappers import RecordEpisodeStatistics
 from drop_fn import DropWrapper
+import csv
+from datetime import datetime
+import pandas as pd
+from peft import LoraConfig, get_peft_model, LoraModel
+import os
+import datetime
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -18,15 +26,31 @@ def get_perf_drop_curve(env: gym.vector.Env, model, rtg_target, drop_ps:list, se
     return_means = []
     for drop_p in drop_ps:
         drop_env = DropWrapper(env, drop_p, seed)
-        mean, _ = eval(drop_env, model, rtg_target)
+        mean, _, _, _,_ = eval(drop_env, model, rtg_target)
         return_means.append(mean)
     return return_means
 
+def get_perf_drop_csv(env: gym.vector.Env, model, rtg_target, drop_ps:list, seed, modelname):
+    droplist = []
+    for drop_p in drop_ps:
+        drop_env = DropWrapper(env, drop_p, seed)
+        mean, std, q75, q25,returns = eval(drop_env, model, rtg_target)
+        droplist.append(returns)
+    with open(modelname+'seed'+str(seed)+'.csv','w') as f:
+        writer = csv.writer(f)
+        for row in droplist:
+            writer.writerow(row)
+
+def save_lora_model(model, task_name, seed,save_path,drop_p=None):
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M")
+    path = f"{save_path}/{task_name}_{drop_p}_seed_{seed}_{timestamp}"
+    os.makedirs(path, exist_ok=True)
+    model.save_pretrained(path)
+    print(f"LoRA adapter saved to {path}")
 @torch.no_grad()
 def eval(env: gym.vector.Env, model: DecisionTransformer, rtg_target):
     # parallel evaluation with vectorized environment
     model.eval()
-    
     episodes = env.num_envs
     reward, returns = np.zeros(episodes), np.zeros(episodes)
     done_flags = np.zeros(episodes, dtype=np.bool8)
@@ -44,12 +68,35 @@ def eval(env: gym.vector.Env, model: DecisionTransformer, rtg_target):
     rewards_to_go = torch.zeros((episodes, max_timestep, 1), dtype=torch.float32, device=device)
 
     reward_to_go, timestep, dropstep = rtg_target, 0, 0
-
     while not done_flags.all():
         states[:, timestep] = torch.from_numpy(state).to(device)
         rewards_to_go[:, timestep] = reward_to_go - torch.from_numpy(returns).to(device).unsqueeze(-1)
         dropsteps[timestep] = dropstep
         obs_index = torch.arange(max(0, timestep-context_len+1), timestep+1)
+        #動的にLoRAを変化させるためにドロップ率を計算
+        if model.dynamic_lora:
+            drop_rate = np.count_nonzero(dropsteps.cpu().numpy()) / dropsteps.numel()
+            if drop_rate<0.1:
+                model.set_adapter("0_0")
+            elif drop_rate<0.2:
+                model.set_adapter("0_1")
+            elif drop_rate<0.3:
+                model.set_adapter("0_2")
+            elif drop_rate<0.4:
+                model.set_adapter("0_3")
+            elif drop_rate<0.5:
+                model.set_adapter("0_4")
+            elif drop_rate<0.6:
+                model.set_adapter("0_5")
+            elif drop_rate<0.7:
+                model.set_adapter("0_6")
+            elif drop_rate<0.8:
+                model.set_adapter("0_7")
+            elif drop_rate<0.9:
+                model.set_adapter("0_8")
+            else:
+                model.set_adapter("0_9")
+            print(f"Drop rate: {drop_rate:.2f}, set LoRA adapter to {model.active_adapter}")
         _, action_preds, _ = model.forward(states[:, obs_index],
                                         actions[:, obs_index],
                                         rewards_to_go[:, obs_index - dropsteps[obs_index].cpu()], # drop rewards
@@ -64,8 +111,9 @@ def eval(env: gym.vector.Env, model: DecisionTransformer, rtg_target):
         returns += reward * ~done_flags
         done_flags = np.bitwise_or(np.bitwise_or(done_flags, dones), truncs)
         timestep += 1
+        q75,q25 = np.percentile(returns,[75,25])
 
-    return np.mean(returns), np.std(returns)
+    return np.mean(returns), np.std(returns), q75, q25,returns
 
 
 def train(cfg, seed, log_dict, idx, logger, barrier, buffer_dir):
@@ -80,6 +128,50 @@ def train(cfg, seed, log_dict, idx, logger, barrier, buffer_dir):
     drop_cfg = cfg.buffer.drop_cfg
     buffer = instantiate(cfg.buffer, root_dir=buffer_dir, drop_cfg=drop_cfg, seed=seed)
     model = instantiate(cfg.model, state_dim=state_dim, action_dim=action_dim, action_space=eval_env.envs[0].action_space, state_mean=buffer.state_mean, state_std=buffer.state_std, device=device)
+    print(model)
+    if cfg.load_model.use_load_model:
+        model.load(cfg.load_model.load_model_path)
+        logger.info(f"Loaded model from {cfg.load_model.load_model_path}")
+    if cfg.lora.use_lora:
+        peft_config = LoraConfig(
+            task_type=None,
+            inference_mode=False,
+            r=cfg.lora.r,
+            lora_alpha=cfg.lora.lora_alpha,
+            lora_dropout=cfg.lora.lora_dropout,
+            target_modules=["q_net", "v_net"],
+        )
+        model = get_peft_model(model, peft_config)
+        model.r=cfg.lora.r
+        model.lora_alpha=cfg.lora.lora_alpha
+        model.lora_dropout=cfg.lora.lora_dropout
+        model.print_trainable_parameters()
+        using_lora = True
+        lora_save_path = cfg.lora.lora_save_path
+    else:
+        using_lora = False
+        lora_save_path = None
+    if cfg.dynamic_lora.use_dynamic_lora:
+        logger.info("Using dynamic LoRA with drop-aware training")
+        model.load_adapter(cfg.dynamic_lora.lora_load_path.drop0_0, adapter_name="0_0",is_trainable=True)
+        model.load_adapter(cfg.dynamic_lora.lora_load_path.drop0_1, adapter_name="0_1",is_trainable=True)
+        model.load_adapter(cfg.dynamic_lora.lora_load_path.drop0_2, adapter_name="0_2",is_trainable=True)
+        model.load_adapter(cfg.dynamic_lora.lora_load_path.drop0_3, adapter_name="0_3",is_trainable=True)
+        model.load_adapter(cfg.dynamic_lora.lora_load_path.drop0_4, adapter_name="0_4",is_trainable=True)
+        model.load_adapter(cfg.dynamic_lora.lora_load_path.drop0_5, adapter_name="0_5",is_trainable=True)
+        model.load_adapter(cfg.dynamic_lora.lora_load_path.drop0_6, adapter_name="0_6",is_trainable=True)
+        model.load_adapter(cfg.dynamic_lora.lora_load_path.drop0_7, adapter_name="0_7",is_trainable=True)
+        model.load_adapter(cfg.dynamic_lora.lora_load_path.drop0_8, adapter_name="0_8",is_trainable=True)
+        model.load_adapter(cfg.dynamic_lora.lora_load_path.drop0_9, adapter_name="0_9",is_trainable=True)
+        model.train()
+        model.dynamic_lora = True
+        model.load_path = cfg.load_model.load_model_path
+    print("Model architecture:")
+    print(model)
+    if cfg.part_dropping.use_part_dropping:
+        logger.info("Using part dropping with drop-aware training")
+        model.use_part_dropping = True
+        model.drop_features = cfg.part_dropping.drop_features
     cfg = DotMap(OmegaConf.to_container(cfg.train, resolve=True))
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda step: min((step+1)/cfg.warmup_steps, 1))
@@ -111,7 +203,7 @@ def train(cfg, seed, log_dict, idx, logger, barrier, buffer_dir):
         scheduler.step()
 
         if timestep % cfg.eval_interval == 0:
-            eval_mean, eval_std = eval(eval_env, model, cfg.rtg_target)
+            eval_mean, eval_std,_,_,_ = eval(eval_env, model, cfg.rtg_target)
             utils.write_to_dict(local_log_dict, 'eval_steps', timestep - 1, using_mp)
             utils.write_to_dict(local_log_dict, 'eval_returns', eval_mean, using_mp)
             d4rl_score = utils.get_d4rl_normalized_score(env_name, eval_mean)
@@ -131,6 +223,7 @@ def train(cfg, seed, log_dict, idx, logger, barrier, buffer_dir):
             model.load(f'best_train_seed_{seed}')
 
             perf_drop_curve = get_perf_drop_curve(eval_env, model, cfg.rtg_target, cfg.eval_drop_ps, seed)
+            get_perf_drop_csv(eval_env, model, cfg.rtg_target, cfg.eval_drop_ps, seed,'train')
             for drop_perf in perf_drop_curve:
                 utils.write_to_dict(local_log_dict, 'perf_drop_train', drop_perf, using_mp)
             if cfg.finetune_steps > 0 and model.drop_aware:
@@ -145,9 +238,12 @@ def train(cfg, seed, log_dict, idx, logger, barrier, buffer_dir):
         model.load(f'best_finetune_seed_{seed}')
 
         perf_drop_curve = get_perf_drop_curve(eval_env, model, cfg.rtg_target, cfg.eval_drop_ps, seed)
+        get_perf_drop_csv(eval_env, model, cfg.rtg_target, cfg.eval_drop_ps, seed,'finetuned')
         for drop_perf in perf_drop_curve:
             utils.write_to_dict(local_log_dict, 'perf_drop_finetune', drop_perf, using_mp)
 
     utils.sync_and_visualize(log_dict, local_log_dict, barrier, idx, timestep, f'{env_name} {buffer.dataset.title()}', using_mp)
     logger.info(f"Finish training seed {seed} with everage eval mean: {eval_mean}")
+    if using_lora and lora_save_path is not None:
+        save_lora_model(model, env_name, seed, lora_save_path,drop_p=drop_cfg.drop_p)
     return eval_mean
