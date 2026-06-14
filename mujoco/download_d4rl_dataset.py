@@ -20,6 +20,7 @@ def filepath_from_url(dataset_url):
 
 def download_dataset_from_url(dataset_url):
 	dataset_filepath = filepath_from_url(dataset_url)
+	os.makedirs(os.path.dirname(dataset_filepath), exist_ok=True)
 	if not os.path.exists(dataset_filepath):
 		print('Downloading dataset:', dataset_url, 'to', dataset_filepath)
 		urllib.request.urlretrieve(dataset_url, dataset_filepath)
@@ -39,7 +40,7 @@ def get_keys(h5file):
 	return keys
 
 def get_dataset(env, env_name, dataset_type):
-	dataset_url = os.path.join(DATASET_URL_BASE, f'{env_name}_{dataset_type}-v2.hdf5')
+	dataset_url = f'{DATASET_URL_BASE}/{env_name}_{dataset_type}-v2.hdf5'
 	h5path = download_dataset_from_url(dataset_url)
 	data_dict = {}
 	with h5py.File(h5path, 'r') as dataset_file:

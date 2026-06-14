@@ -4,8 +4,8 @@ defaults:
 
 seeds: 
 - 0
-- 1
-- 2
+#- 1
+#- 2
 # - 42
 # - 3407 # https://arxiv.org/abs/2109.08203
 
@@ -66,17 +66,19 @@ lora:
   r: 8
   lora_alpha: 16
   lora_dropout: 0.0
-  lora_save_path: /home/daikiyotsufuji/CODE/DeFog/mujoco/model/lora
+  #lora_save_path: /home/daikiyotsufuji/CODE/DeFog/mujoco/model/lora
+  lora_save_path: C:\vscodeC\DeFogLoRA\LoRADeFog\mujoco\model
   lora_load_path: /home/daikiyotsufuji/CODE/DeFog/mujoco/model/lora/
 load_model:
-  use_load_model: true
+  use_load_model: false
   #last ni .pt ha iranai!
   load_model_path: /home/daikiyotsufuji/CODE/DeFog/mujoco/model/walker2d_medium_00
   # CUDA_VISIBLE_DEVICES=1 python main.py 
 
 part_dropping:
   use_part_dropping: true
-  drop_features: [0, 1, 2]
+  drop_features: [0]   # feature indices to drop independently
+  drop_p: 0.5                 # per-feature drop probability
 
 dynamic_lora:
   use_dynamic_lora: false

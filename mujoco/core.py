@@ -12,7 +12,7 @@ from buffer import SequenceBuffer
 import torch.nn.functional as F
 from gymnasium.vector import SyncVectorEnv
 from gymnasium.wrappers import RecordEpisodeStatistics
-from drop_fn import DropWrapper
+from drop_fn import DropWrapper, PerFeatureDropWrapper
 import csv
 from datetime import datetime
 import pandas as pd
@@ -24,26 +24,35 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 def get_perf_drop_curve(env: gym.vector.Env, model, rtg_target, drop_ps:list, seed):
     return_means = []
+    use_per_feat = getattr(model, 'use_per_feat_dropping', False)
     for drop_p in drop_ps:
-        drop_env = DropWrapper(env, drop_p, seed)
-        mean, _, _, _,_ = eval(drop_env, model, rtg_target)
+        if use_per_feat:
+            drop_env = PerFeatureDropWrapper(env, drop_p, model.drop_features, seed)
+        else:
+            drop_env = DropWrapper(env, drop_p, seed)
+        mean, _, _, _, _ = eval(drop_env, model, rtg_target)
         return_means.append(mean)
     return return_means
 
 def get_perf_drop_csv(env: gym.vector.Env, model, rtg_target, drop_ps:list, seed, modelname):
     droplist = []
+    use_per_feat = getattr(model, 'use_per_feat_dropping', False)
     for drop_p in drop_ps:
-        drop_env = DropWrapper(env, drop_p, seed)
-        mean, std, q75, q25,returns = eval(drop_env, model, rtg_target)
+        if use_per_feat:
+            drop_env = PerFeatureDropWrapper(env, drop_p, model.drop_features, seed)
+        else:
+            drop_env = DropWrapper(env, drop_p, seed)
+        mean, std, q75, q25, returns = eval(drop_env, model, rtg_target)
         droplist.append(returns)
     with open(modelname+'seed'+str(seed)+'.csv','w') as f:
         writer = csv.writer(f)
         for row in droplist:
             writer.writerow(row)
 
-def save_lora_model(model, task_name, seed,save_path,drop_p=None):
+def save_lora_model(model, task_name, seed, save_path, drop_p=None, drop_features=None):
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M")
-    path = f"{save_path}/{task_name}_{drop_p}_seed_{seed}_{timestamp}"
+    feats_str = "feats" + "-".join(map(str, drop_features)) if drop_features else "featsnone"
+    path = f"{save_path}/{task_name}_{drop_p}_{feats_str}_seed_{seed}_{timestamp}"
     os.makedirs(path, exist_ok=True)
     model.save_pretrained(path)
     print(f"LoRA adapter saved to {path}")
@@ -60,20 +69,35 @@ def eval(env: gym.vector.Env, model: DecisionTransformer, rtg_target):
     max_timestep = model.max_timestep
     context_len = model.context_len
     timesteps = torch.arange(max_timestep, device=device)
-    dropsteps = torch.zeros(max_timestep, device=device, dtype=torch.long)
+
+    use_per_feat = getattr(model, 'use_per_feat_dropping', False)
+    if use_per_feat:
+        n_feats = len(model.drop_features)
+        dropsteps = torch.zeros(max_timestep, n_feats, device=device, dtype=torch.long)
+        per_feat_dropstep = np.zeros(n_feats, dtype=np.int32)
+    else:
+        dropsteps = torch.zeros(max_timestep, device=device, dtype=torch.long)
+        dropstep = 0
+
     state, _ = env.reset(seed=[np.random.randint(0, 10000) for _ in range(episodes)])
-    
+
     states = torch.zeros((episodes, max_timestep, state_dim), dtype=torch.float32, device=device)
     actions = torch.zeros((episodes, max_timestep, act_dim), dtype=torch.float32, device=device)
     rewards_to_go = torch.zeros((episodes, max_timestep, 1), dtype=torch.float32, device=device)
 
-    reward_to_go, timestep, dropstep = rtg_target, 0, 0
+    reward_to_go, timestep = rtg_target, 0
     while not done_flags.all():
         states[:, timestep] = torch.from_numpy(state).to(device)
         rewards_to_go[:, timestep] = reward_to_go - torch.from_numpy(returns).to(device).unsqueeze(-1)
-        dropsteps[timestep] = dropstep
+
+        if use_per_feat:
+            dropsteps[timestep] = torch.from_numpy(per_feat_dropstep).to(device)
+        else:
+            dropsteps[timestep] = dropstep
+
         obs_index = torch.arange(max(0, timestep-context_len+1), timestep+1)
-        #動的にLoRAを変化させるためにドロップ率を計算
+
+        # 動的にLoRAを変化させるためにドロップ率を計算
         if model.dynamic_lora:
             drop_rate = np.count_nonzero(dropsteps.cpu().numpy()) / dropsteps.numel()
             if drop_rate<0.1:
@@ -97,23 +121,40 @@ def eval(env: gym.vector.Env, model: DecisionTransformer, rtg_target):
             else:
                 model.set_adapter("0_9")
             print(f"Drop rate: {drop_rate:.2f}, set LoRA adapter to {model.active_adapter}")
-        _, action_preds, _ = model.forward(states[:, obs_index],
-                                        actions[:, obs_index],
-                                        rewards_to_go[:, obs_index - dropsteps[obs_index].cpu()], # drop rewards
-                                        timesteps[None, obs_index],
-                                        dropsteps[None, obs_index])
+
+        if use_per_feat:
+            ds = dropsteps[None, obs_index]  # (1, T, n_feats)
+            _, action_preds, _ = model.forward(
+                states[:, obs_index],
+                actions[:, obs_index],
+                rewards_to_go[:, obs_index],          # no rtg shift for per-feature eval
+                timesteps[None, obs_index],
+                ds)
+        else:
+            _, action_preds, _ = model.forward(
+                states[:, obs_index],
+                actions[:, obs_index],
+                rewards_to_go[:, obs_index - dropsteps[obs_index].cpu()],  # drop rewards
+                timesteps[None, obs_index],
+                dropsteps[None, obs_index])
 
         action = action_preds[:, -1].detach()
         actions[:, timestep] = action
 
         state, reward, dones, truncs, info = env.step(action.cpu().numpy())
-        dropstep = dropsteps[timestep].item() + 1 if info.get('dropped', False) else 0
+
+        if use_per_feat:
+            feat_ds = info.get('feat_dropsteps', None)
+            per_feat_dropstep = feat_ds if feat_ds is not None else np.zeros(n_feats, dtype=np.int32)
+        else:
+            dropstep = dropsteps[timestep].item() + 1 if info.get('dropped', False) else 0
+
         returns += reward * ~done_flags
         done_flags = np.bitwise_or(np.bitwise_or(done_flags, dones), truncs)
         timestep += 1
-        q75,q25 = np.percentile(returns,[75,25])
+        q75, q25 = np.percentile(returns, [75, 25])
 
-    return np.mean(returns), np.std(returns), q75, q25,returns
+    return np.mean(returns), np.std(returns), q75, q25, returns
 
 
 def train(cfg, seed, log_dict, idx, logger, barrier, buffer_dir):
@@ -125,7 +166,11 @@ def train(cfg, seed, log_dict, idx, logger, barrier, buffer_dir):
 
     state_dim = utils.get_space_shape(eval_env.observation_space, is_vector_env=True)
     action_dim = utils.get_space_shape(eval_env.action_space, is_vector_env=True)
-    drop_cfg = cfg.buffer.drop_cfg
+    drop_cfg = DotMap(OmegaConf.to_container(cfg.buffer.drop_cfg, resolve=True))
+    if cfg.part_dropping.use_part_dropping:
+        drop_cfg.drop_fn = 'per_feat_const'
+        drop_cfg.drop_features = list(cfg.part_dropping.drop_features)
+        drop_cfg.drop_p = cfg.part_dropping.drop_p
     buffer = instantiate(cfg.buffer, root_dir=buffer_dir, drop_cfg=drop_cfg, seed=seed)
     model = instantiate(cfg.model, state_dim=state_dim, action_dim=action_dim, action_space=eval_env.envs[0].action_space, state_mean=buffer.state_mean, state_std=buffer.state_std, device=device)
     print(model)
@@ -166,12 +211,16 @@ def train(cfg, seed, log_dict, idx, logger, barrier, buffer_dir):
         model.train()
         model.dynamic_lora = True
         model.load_path = cfg.load_model.load_model_path
+    else:
+        model.dynamic_lora = False
     print("Model architecture:")
     print(model)
     if cfg.part_dropping.use_part_dropping:
-        logger.info("Using part dropping with drop-aware training")
-        model.use_part_dropping = True
-        model.drop_features = cfg.part_dropping.drop_features
+        logger.info(f"Using per-feature dropping: features={list(cfg.part_dropping.drop_features)}, drop_p={cfg.part_dropping.drop_p}")
+        model.use_per_feat_dropping = True
+        model.drop_features = list(cfg.part_dropping.drop_features)
+    else:
+        model.use_per_feat_dropping = False
     cfg = DotMap(OmegaConf.to_container(cfg.train, resolve=True))
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda step: min((step+1)/cfg.warmup_steps, 1))
@@ -245,5 +294,6 @@ def train(cfg, seed, log_dict, idx, logger, barrier, buffer_dir):
     utils.sync_and_visualize(log_dict, local_log_dict, barrier, idx, timestep, f'{env_name} {buffer.dataset.title()}', using_mp)
     logger.info(f"Finish training seed {seed} with everage eval mean: {eval_mean}")
     if using_lora and lora_save_path is not None:
-        save_lora_model(model, env_name, seed, lora_save_path,drop_p=drop_cfg.drop_p)
+        drop_features = drop_cfg.drop_features if drop_cfg.drop_fn == 'per_feat_const' else None
+        save_lora_model(model, env_name, seed, lora_save_path, drop_p=drop_cfg.drop_p, drop_features=drop_features)
     return eval_mean

@@ -4,7 +4,7 @@ import torch
 import pickle
 import numpy as np
 from dotmap import DotMap
-from drop_fn import get_drop_fn
+from drop_fn import get_drop_fn, PerFeatureDropFn
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 def discount_cumsum(x, gamma):
@@ -72,13 +72,26 @@ class SequenceBuffer():
         
         # update and get drop mask
         self.drop_fn.step()
-        dropsteps = self.drop_fn.get_dropsteps(selected_index)
-        observation_index = selected_index - dropsteps
+        dropsteps_np = self.drop_fn.get_dropsteps(selected_index)
 
-        states = torch.as_tensor(self.states[observation_index, :]).to(dtype=torch.float32, device=device)
+        if isinstance(self.drop_fn, PerFeatureDropFn):
+            # Per-feature: each feature may come from a different past timestep.
+            # dropsteps_np shape: (B, T, n_feats)
+            states_np = self.states[selected_index, :].copy()   # (B, T, state_dim) baseline
+            for i, feat_idx in enumerate(self.drop_fn.drop_features):
+                obs_idx_f = selected_index - dropsteps_np[:, :, i]   # (B, T)
+                states_np[:, :, feat_idx] = self.states[obs_idx_f, feat_idx]
+            states = torch.as_tensor(states_np).to(dtype=torch.float32, device=device)
+            # rtg is never dropped: always use the current timestep's value
+            rewards_to_go = torch.as_tensor(self.rewards_to_go[selected_index, None]).to(dtype=torch.float32, device=device)
+            dropsteps = torch.as_tensor(dropsteps_np).to(dtype=torch.long, device=device)  # (B, T, n_feats)
+        else:
+            observation_index = selected_index - dropsteps_np
+            states = torch.as_tensor(self.states[observation_index, :]).to(dtype=torch.float32, device=device)
+            rewards_to_go = torch.as_tensor(self.rewards_to_go[observation_index, None]).to(dtype=torch.float32, device=device)
+            dropsteps = torch.as_tensor(dropsteps_np).to(dtype=torch.long, device=device)  # (B, T)
+
         actions = torch.as_tensor(self.actions[selected_index, :]).to(dtype=torch.float32, device=device)
-        rewards_to_go = torch.as_tensor(self.rewards_to_go[observation_index, None]).to(dtype=torch.float32, device=device)
         timesteps = torch.as_tensor(timesteps).to(dtype=torch.int32, device=device)
-        dropsteps = torch.as_tensor(dropsteps).to(dtype=torch.int32, device=device)
 
         return states, actions, rewards_to_go, timesteps, dropsteps, masks

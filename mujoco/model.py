@@ -156,7 +156,12 @@ class DecisionTransformer(nn.Module):
         returns_embeddings = self.embed_rtg(rewards_to_go) + time_embeddings
 
         if self.drop_aware:
-            drop_embeddings = self.embed_dropstep(dropsteps)
+            if dropsteps.dim() == 3:
+                # Per-feature: (B, T, n_feats) → embed each feature's dropstep, sum over features
+                drop_embeddings = self.embed_dropstep(dropsteps).sum(dim=2)  # (B, T, hidden_dim)
+            else:
+                # Global: (B, T)
+                drop_embeddings = self.embed_dropstep(dropsteps)              # (B, T, hidden_dim)
             state_embeddings += drop_embeddings
             returns_embeddings += drop_embeddings
         # stack rtg, states and actions and reshape sequence as
