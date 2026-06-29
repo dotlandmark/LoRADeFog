@@ -80,6 +80,15 @@ part_dropping:
   drop_features: [0]   # feature indices to drop independently
   drop_p: 0.5                 # per-feature drop probability
 
+feature_lora:
+  use_feature_lora: false
+  adapter_paths:                        # アダプタ名 → 学習済みアダプタのディレクトリパス
+    feat_0: /path/to/adapter_feat0      # 特徴量 0 が欠落した状況で学習したアダプタ
+    feat_1: /path/to/adapter_feat1
+    feat_2: /path/to/adapter_feat2
+  merge_weight: 1.0                     # 各アダプタに与える重み（1.0 = 各アダプタの ΔW をそのまま加算）
+  precompute_all: true                  # 起動時に全組み合わせを事前マージ（drop_features が 6 個以下推奨）
+
 dynamic_lora:
   use_dynamic_lora: false
   lora_load_path:

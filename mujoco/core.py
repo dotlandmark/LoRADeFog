@@ -16,6 +16,7 @@ from drop_fn import DropWrapper, PerFeatureDropWrapper
 import csv
 from datetime import datetime
 import pandas as pd
+from itertools import combinations
 from peft import LoraConfig, get_peft_model, LoraModel
 import os
 import datetime
@@ -48,6 +49,51 @@ def get_perf_drop_csv(env: gym.vector.Env, model, rtg_target, drop_ps:list, seed
         writer = csv.writer(f)
         for row in droplist:
             writer.writerow(row)
+
+def apply_feature_lora(model, per_feat_dropstep: np.ndarray) -> None:
+    """現在 drop されている特徴量に対応するアダプタをマージしてモデルに適用する。
+
+    Args:
+        model: PEFT でラップされた DecisionTransformer
+        per_feat_dropstep: shape (n_feats,)。各特徴量の dropstep 距離
+    """
+    # 現在 drop されている特徴量の state インデックス集合
+    active_set = frozenset(
+        model.drop_features[i]
+        for i, ds in enumerate(per_feat_dropstep)
+        if ds > 0
+    )
+
+    # 前回呼び出しと同じ組み合わせなら何もしない
+    if active_set == model._feature_lora_active_set:
+        return
+    model._feature_lora_active_set = active_set
+
+    if not active_set:
+        # どの特徴量も drop されていない → LoRA を無効化してベースモデルで推論
+        model.disable_adapter_layers()
+        return
+
+    # LoRA 層が無効化されていた場合は再有効化
+    model.enable_adapter_layers()
+
+    cache_key = tuple(sorted(active_set))
+    adapter_name = "merged_" + "_".join(map(str, cache_key))
+
+    if adapter_name not in model._feature_lora_cache:
+        source_adapters = [f"feat_{idx}" for idx in cache_key]
+        n = len(source_adapters)
+        w = model._feature_lora_merge_weight
+        model.add_weighted_adapter(
+            adapters=source_adapters,
+            weights=[w] * n,
+            adapter_name=adapter_name,
+            combination_type="linear",
+        )
+        model._feature_lora_cache.add(adapter_name)
+
+    model.set_adapter(adapter_name)
+
 
 def save_lora_model(model, task_name, seed, save_path, drop_p=None, drop_features=None):
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M")
@@ -121,6 +167,9 @@ def eval(env: gym.vector.Env, model: DecisionTransformer, rtg_target):
             else:
                 model.set_adapter("0_9")
             print(f"Drop rate: {drop_rate:.2f}, set LoRA adapter to {model.active_adapter}")
+
+        if use_per_feat and getattr(model, 'use_feature_lora', False):
+            apply_feature_lora(model, per_feat_dropstep)
 
         if use_per_feat:
             ds = dropsteps[None, obs_index]  # (1, T, n_feats)
@@ -221,6 +270,36 @@ def train(cfg, seed, log_dict, idx, logger, barrier, buffer_dir):
         model.drop_features = list(cfg.part_dropping.drop_features)
     else:
         model.use_per_feat_dropping = False
+    if cfg.feature_lora.use_feature_lora:
+        logger.info("Loading feature-specific LoRA adapters")
+        adapter_paths = OmegaConf.to_container(cfg.feature_lora.adapter_paths, resolve=True)
+        for adapter_name, path in adapter_paths.items():
+            model.load_adapter(path, adapter_name=adapter_name, is_trainable=False)
+            logger.info(f"Loaded adapter '{adapter_name}' from {path}")
+        model.use_feature_lora = True
+        model._feature_lora_cache = set()
+        model._feature_lora_active_set = None
+        model._feature_lora_merge_weight = cfg.feature_lora.merge_weight
+        if cfg.feature_lora.precompute_all:
+            drop_features = list(cfg.part_dropping.drop_features)
+            logger.info(f"Pre-computing all {2**len(drop_features) - 1} feature LoRA combinations")
+            for r in range(1, len(drop_features) + 1):
+                for combo in combinations(drop_features, r):
+                    cache_key = tuple(sorted(combo))
+                    merged_name = "merged_" + "_".join(map(str, cache_key))
+                    source_adapters = [f"feat_{idx}" for idx in cache_key]
+                    n = len(source_adapters)
+                    w = cfg.feature_lora.merge_weight
+                    model.add_weighted_adapter(
+                        adapters=source_adapters,
+                        weights=[w] * n,
+                        adapter_name=merged_name,
+                        combination_type="linear",
+                    )
+                    model._feature_lora_cache.add(merged_name)
+                    logger.info(f"Pre-computed '{merged_name}'")
+    else:
+        model.use_feature_lora = False
     cfg = DotMap(OmegaConf.to_container(cfg.train, resolve=True))
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda step: min((step+1)/cfg.warmup_steps, 1))
